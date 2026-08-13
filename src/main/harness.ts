@@ -1,21 +1,37 @@
 /**
- * HarnessController owns the DeepSeek Harness subprocess lifecycle:
- * spawn (pinned spec, fixed argv), readiness (official stdout line, then an
- * HTTP 200 confirmation), failure capture, and process-tree termination.
- * Logs are kept here in raw form; sanitization happens at the IPC boundary.
+ * HarnessController owns the DeepSeek Harness subprocess lifecycle and is the
+ * ONLY entry point for it (index.ts / renderer / workspace modules never
+ * spawn or kill directly).
+ *
+ * V1.1 reliability model:
+ * - all lifecycle operations run through one promise queue, so start/stop/
+ *   restart are serialized and idempotent (no double spawn, no races);
+ * - `exit` / `close` / `error` are all observed, and expected shutdowns
+ *   (quit/restart/back) are distinguished from unexpected exits;
+ * - every failure carries a classified reason (kind + message);
+ * - after `ready`, a lightweight health monitor polls GET / on the harness
+ *   origin only. It NEVER kills a live process: consecutive failures move the
+ *   state to `disconnected` and leave the decision to the user.
+ * Logs are kept per stream in raw form; sanitization happens at the IPC
+ * boundary (see logs.ts).
  */
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { get } from 'node:http';
 import {
+  HEALTH_CHECK_INTERVAL_MS,
+  HEALTH_CHECK_TIMEOUT_MS,
+  HEALTH_FAIL_THRESHOLD,
   HTTP_CONFIRM_TIMEOUT_MS,
   HTTP_POLL_INTERVAL_MS,
   MAX_CAPTURED_LOG_CHARS,
   READY_LINE_PATTERN,
   READY_LINE_TIMEOUT_MS,
   REQUIRED_NODE_RANGE,
+  STOP_WAIT_TIMEOUT_MS,
 } from './config';
 import { findNodeToolchain, killProcessTree, spawnHarness } from './process';
+import type { KillResult } from './process';
 
 export type HarnessPhase =
   | 'idle'
@@ -24,16 +40,39 @@ export type HarnessPhase =
   | 'awaiting-http'
   | 'ready'
   | 'stopping'
-  | 'failed';
+  | 'failed'
+  | 'disconnected';
+
+/** Who asked for a stop — expected shutdowns are never treated as crashes. */
+export type StopReason = 'quit' | 'restart' | 'back' | 'startup-failure-cleanup';
+
+/** Classified failure kinds shown on the lost/error pages. */
+export type FailureKind =
+  | 'startup-failed'
+  | 'process-exited'
+  | 'process-error'
+  | 'unexpected-exit-code'
+  | 'health-check-failed'
+  | 'unknown';
+
+export interface HarnessReason {
+  kind: FailureKind;
+  message: string;
+}
+
+export interface HarnessLogs {
+  stdout: string;
+  stderr: string;
+}
 
 export interface HarnessState {
   phase: HarnessPhase;
   workspace: string | null;
   url: string | null;
-  error: string | null;
   pid: number | null;
-  /** Raw tail of captured stdout/stderr (sanitized before reaching the UI). */
-  logTail: string;
+  reason: HarnessReason | null;
+  /** Raw per-stream tails (sanitized before reaching the UI). */
+  logs: HarnessLogs;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,21 +97,31 @@ export class HarnessController extends EventEmitter {
   private phase: HarnessPhase = 'idle';
   private workspace: string | null = null;
   private url: string | null = null;
-  private error: string | null = null;
-  private logBuffer = '';
+  private reason: HarnessReason | null = null;
+  private stdoutBuffer = '';
+  private stderrBuffer = '';
   private readinessTimer: NodeJS.Timeout | null = null;
+  private healthTimer: NodeJS.Timeout | null = null;
+  private healthFailures = 0;
   private httpDeadline = 0;
   private stopRequested = false;
+  private exitHandled = false;
+  /** Serializes every lifecycle operation; see enqueue(). */
+  private queue: Promise<void> = Promise.resolve();
 
   getState(): HarnessState {
     return {
       phase: this.phase,
       workspace: this.workspace,
       url: this.url,
-      error: this.error,
       pid: this.child?.pid ?? null,
-      logTail: this.logBuffer,
+      reason: this.reason,
+      logs: this.getLogs(),
     };
+  }
+
+  getLogs(): HarnessLogs {
+    return { stdout: this.stdoutBuffer, stderr: this.stderrBuffer };
   }
 
   isRunning(): boolean {
@@ -84,27 +133,65 @@ export class HarnessController extends EventEmitter {
     );
   }
 
+  /** A live process may exist while running OR while merely disconnected. */
+  isActive(): boolean {
+    return this.isRunning() || this.phase === 'disconnected' || this.phase === 'stopping';
+  }
+
+  /** Serialize one lifecycle operation after any in-flight one. */
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(operation, operation);
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   /**
    * Spawn the harness for a workspace and drive it to `ready`.
-   * Never rejects; every failure lands in the `failed` state.
+   * Serialized; a call while another lifecycle operation is in flight waits.
    */
-  async start(workspace: string): Promise<void> {
+  start(workspace: string): Promise<void> {
+    return this.enqueue(() => this.startInternal(workspace));
+  }
+
+  /** Terminate the harness tree (serialized, idempotent). */
+  stop(reason: StopReason): Promise<void> {
+    return this.enqueue(() => this.stopInternal(reason));
+  }
+
+  /** stop + start on the same workspace; a user-driven recovery action. */
+  restart(): Promise<void> {
+    return this.enqueue(async () => {
+      const current = this.workspace;
+      if (current === null) return;
+      await this.stopInternal('restart');
+      await this.startInternal(current);
+    });
+  }
+
+  private async startInternal(workspace: string): Promise<void> {
     if (this.isRunning() || this.phase === 'stopping') return;
     // Enter the running phase first so every failure below can be recorded.
     this.setPhase('starting');
     // A previous failed run may still hold a dying child: make sure it is gone.
     if (this.child !== null && this.child.pid !== undefined && this.child.exitCode === null) {
-      await killProcessTree(this.child.pid);
+      const kill = await killProcessTree(this.child.pid);
+      if (!kill.ok) this.emit('log', `cleanup kill: ${kill.detail}`);
     }
     this.workspace = workspace;
     this.url = null;
-    this.error = null;
-    this.logBuffer = '';
+    this.reason = null;
+    this.stdoutBuffer = '';
+    this.stderrBuffer = '';
     this.stopRequested = false;
+    this.exitHandled = false;
+    this.healthFailures = 0;
 
     const toolchain = findNodeToolchain();
     if (toolchain === null) {
-      this.fail(`Node.js/npm not found: install Node.js ${REQUIRED_NODE_RANGE} and make sure "npm" is on PATH`);
+      this.fail('startup-failed', `Node.js/npm not found: install Node.js ${REQUIRED_NODE_RANGE} and make sure "npm" is on PATH`);
       return;
     }
 
@@ -112,47 +199,68 @@ export class HarnessController extends EventEmitter {
     try {
       child = spawnHarness(toolchain, workspace);
     } catch (err) {
-      this.fail(`failed to spawn harness: ${err instanceof Error ? err.message : String(err)}`);
+      this.fail('startup-failed', `failed to spawn harness: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
     this.child = child;
     child.stdout?.on('data', (chunk: Buffer) => {
-      this.appendLog(chunk);
+      this.appendLog('stdout', chunk);
       this.scanReadiness();
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      this.appendLog(chunk);
+      this.appendLog('stderr', chunk);
       this.scanReadiness();
     });
     child.once('error', (err) => {
-      this.fail(`harness process error: ${err.message}`);
+      this.fail('process-error', `harness process error: ${err.message}`);
     });
     child.once('exit', (code, signal) => {
       this.onChildExit(code, signal);
     });
+    child.once('close', (code, signal) => {
+      // 'exit' is authoritative; 'close' is a fallback for odd paths where
+      // exit was not observed (both may fire — handled exactly once).
+      if (!this.exitHandled) this.onChildExit(code, signal);
+    });
     this.emit('spawned', child.pid);
     this.readinessTimer = setTimeout(() => {
-      this.fail(`timed out after ${Math.round(READY_LINE_TIMEOUT_MS / 1000)}s waiting for the "dsh web:" readiness line`);
+      this.fail(
+        'startup-failed',
+        `timed out after ${Math.round(READY_LINE_TIMEOUT_MS / 1000)}s waiting for the "dsh web:" readiness line`,
+      );
     }, READY_LINE_TIMEOUT_MS);
     this.setPhase('awaiting-url');
   }
 
-  /**
-   * Terminate the harness tree (idempotent). Used on quit and on
-   * "choose another workspace".
-   */
-  async stop(): Promise<void> {
-    if (this.phase === 'idle' || this.phase === 'stopping') return;
+  private async stopInternal(reason: StopReason): Promise<void> {
+    if (this.phase === 'idle') return;
+    if (this.phase === 'stopping') return;
     this.stopRequested = true;
     this.clearTimers();
+    this.stopHealthMonitor();
     const child = this.child;
     this.setPhase('stopping');
     if (child !== null && child.pid !== undefined && child.exitCode === null) {
       const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-      await killProcessTree(child.pid);
-      await Promise.race([exited, sleep(5000)]);
+      const kill: KillResult = await killProcessTree(child.pid);
+      this.emit('log', `stop (${reason}): ${kill.detail}`);
+      if (!kill.ok) {
+        this.emit('log', `stop (${reason}): taskkill failed, falling back to child.kill`);
+        try {
+          child.kill();
+        } catch {
+          // Last resort already attempted; the exit-wait below still caps us.
+        }
+      }
+      await Promise.race([exited, sleep(STOP_WAIT_TIMEOUT_MS)]);
+      if (child.exitCode === null && child.signalCode === null) {
+        this.emit('log', `stop (${reason}): child did not exit within ${STOP_WAIT_TIMEOUT_MS}ms`);
+      }
     }
     this.child = null;
+    this.workspace = null;
+    this.url = null;
+    this.reason = null;
     this.setPhase('idle');
   }
 
@@ -168,24 +276,25 @@ export class HarnessController extends EventEmitter {
     }
   }
 
-  private appendLog(chunk: Buffer): void {
-    this.logBuffer += chunk.toString('utf8');
-    if (this.logBuffer.length > MAX_CAPTURED_LOG_CHARS) {
-      this.logBuffer = this.logBuffer.slice(-MAX_CAPTURED_LOG_CHARS);
+  private appendLog(stream: 'stdout' | 'stderr', chunk: Buffer): void {
+    const buffer = stream === 'stdout' ? 'stdoutBuffer' : 'stderrBuffer';
+    this[buffer] += chunk.toString('utf8');
+    if (this[buffer].length > MAX_CAPTURED_LOG_CHARS) {
+      this[buffer] = this[buffer].slice(-MAX_CAPTURED_LOG_CHARS);
     }
   }
 
   /** Look for the official `dsh web: http://…` line in everything captured so far. */
   private scanReadiness(): void {
     if (this.phase !== 'awaiting-url') return;
-    const match = READY_LINE_PATTERN.exec(this.logBuffer);
+    const match = READY_LINE_PATTERN.exec(this.stdoutBuffer);
     if (match === null) return;
     this.url = match[1] ?? null;
     this.clearTimers();
     this.setPhase('awaiting-http');
     this.httpDeadline = Date.now() + HTTP_CONFIRM_TIMEOUT_MS;
     void this.pollHttp().catch((err: Error) => {
-      if (this.phase === 'awaiting-http') this.fail(err.message);
+      if (this.phase === 'awaiting-http') this.fail('startup-failed', err.message);
     });
   }
 
@@ -193,6 +302,7 @@ export class HarnessController extends EventEmitter {
     while (this.phase === 'awaiting-http' && Date.now() < this.httpDeadline) {
       if (this.url !== null && (await httpGetOk(this.url, 2000))) {
         this.setPhase('ready');
+        this.startHealthMonitor();
         return;
       }
       await sleep(HTTP_POLL_INTERVAL_MS);
@@ -204,20 +314,77 @@ export class HarnessController extends EventEmitter {
     }
   }
 
-  private onChildExit(code: number | null, signal: NodeJS.Signals | null): void {
-    if (this.stopRequested) return;
-    if (this.isRunning()) {
-      this.fail(`harness process exited unexpectedly (code ${code ?? '?'}, signal ${signal ?? 'none'})`);
+  // ── post-ready health monitor ────────────────────────────────────────────
+  // Detection only: consecutive GET / failures on the harness origin move the
+  // state to `disconnected`. A live process is NEVER killed here — only the
+  // user (restart / back / quit) can trigger stop().
+
+  private startHealthMonitor(): void {
+    this.stopHealthMonitor();
+    this.healthFailures = 0;
+    const tick = (): void => {
+      if (this.phase !== 'ready') return;
+      const url = this.url;
+      if (url === null) return;
+      void httpGetOk(url, HEALTH_CHECK_TIMEOUT_MS).then((ok) => {
+        if (this.phase !== 'ready') return;
+        if (ok) {
+          const recovered = this.healthFailures > 0;
+          this.healthFailures = 0;
+          this.emit('health', { ok: true, consecutiveFailures: 0, recovered });
+        } else {
+          this.healthFailures += 1;
+          this.emit('health', { ok: false, consecutiveFailures: this.healthFailures, recovered: false });
+          if (this.healthFailures >= HEALTH_FAIL_THRESHOLD && this.child !== null && this.child.exitCode === null) {
+            this.reason = {
+              kind: 'health-check-failed',
+              message:
+                `health check failed ${this.healthFailures} times in a row (GET ${url}) while the harness process is still alive`,
+            };
+            this.setPhase('disconnected');
+            return;
+          }
+        }
+        if (this.phase === 'ready') this.healthTimer = setTimeout(tick, HEALTH_CHECK_INTERVAL_MS);
+      });
+    };
+    this.healthTimer = setTimeout(tick, HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  private stopHealthMonitor(): void {
+    if (this.healthTimer !== null) {
+      clearTimeout(this.healthTimer);
+      this.healthTimer = null;
     }
   }
 
-  private fail(reason: string): void {
+  // ── child lifecycle ──────────────────────────────────────────────────────
+
+  private onChildExit(code: number | null, signal: NodeJS.Signals | null): void {
+    this.exitHandled = true;
+    if (this.stopRequested || this.phase === 'stopping' || this.phase === 'idle') return;
+    if (this.phase === 'failed' || this.phase === 'disconnected') return;
+    if (!this.isRunning()) return;
+    const codeText = code ?? '?';
+    const signalText = signal ?? 'none';
+    const duringStartup = this.phase === 'starting' || this.phase === 'awaiting-url' || this.phase === 'awaiting-http';
+    if (duringStartup && code !== null && code !== 0) {
+      this.fail('unexpected-exit-code', `harness exited with code ${codeText} before becoming ready (signal ${signalText})`);
+      return;
+    }
+    this.fail('process-exited', `harness process exited unexpectedly (code ${codeText}, signal ${signalText})`);
+  }
+
+  private fail(kind: FailureKind, message: string): void {
     if (this.phase === 'idle' || this.phase === 'stopping') return;
     this.clearTimers();
-    this.error = reason;
+    this.stopHealthMonitor();
+    this.reason = { kind, message };
     this.setPhase('failed');
     if (this.child !== null && this.child.pid !== undefined && this.child.exitCode === null) {
-      void killProcessTree(this.child.pid);
+      void killProcessTree(this.child.pid).then((kill) => {
+        if (!kill.ok) this.emit('log', `failure cleanup kill: ${kill.detail}`);
+      });
     }
   }
 }

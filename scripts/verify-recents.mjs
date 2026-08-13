@@ -103,6 +103,19 @@ async function main() {
     const after = await cdp.eval('document.body.innerText');
     fs.writeFileSync('.verify-recents-after-remove.txt', after);
     console.log(after);
+  } else if (mode === 'remove-missing') {
+    const clicked = await cdp.eval(`(() => {
+      const li = [...document.querySelectorAll('#recents-list li')].find((e) => e.textContent.includes('(missing)'));
+      if (!li) return 'NO_ELEMENT';
+      const el = li.querySelector('.recent-remove');
+      if (!el) return 'NO_ELEMENT';
+      el.click(); return 'OK';
+    })()`);
+    console.log(`remove-missing: ${clicked}`);
+    await sleep(1000);
+    const after = await cdp.eval('document.body.innerText');
+    fs.writeFileSync('.verify-recents-after-remove.txt', after);
+    console.log(after);
   } else {
     throw new Error(`unknown mode ${mode}`);
   }

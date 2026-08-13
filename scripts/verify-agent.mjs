@@ -27,6 +27,12 @@ const PROMPT =
   '完成后直接给出总结，全程不要执行任何写入操作。';
 const PROMPT_MARKER = '只读探查任务';
 
+const LONG_TASK_PROMPT =
+  '这是一个只读忙碌任务：请分 4 次调用 pwsh 工具，每次都执行 ' +
+  'Start-Sleep -Seconds 15 然后 Get-Date，两次调用之间用一句话报告进度。' +
+  '全程只读，不要修改、创建或删除任何文件。最后用一句话总结总耗时。';
+const LONG_TASK_MARKER = '只读忙碌任务';
+
 const RESULT_FILE = '.verify-agent-result.json';
 
 async function httpJson(pathname) {
@@ -189,7 +195,7 @@ function sessionFileOf(dir) {
   return name ? path.join(dir, name) : null;
 }
 
-function analyze(events) {
+function analyze(events, marker) {
   const toolNames = [];
   const isErrors = [];
   const titleEvent = events.find((e) => e.type === 'session/title');
@@ -211,7 +217,7 @@ function analyze(events) {
       }
     }
   }
-  const promptFound = events.some((e) => e.type === 'user/message' && JSON.stringify(e).includes(PROMPT_MARKER));
+  const promptFound = events.some((e) => e.type === 'user/message' && JSON.stringify(e).includes(marker));
   return {
     toolNames,
     isErrorCount: isErrors.length,
@@ -221,50 +227,63 @@ function analyze(events) {
   };
 }
 
-async function waitForTurnComplete(t0, timeoutMs = 420_000) {
+async function waitForTurnComplete(t0, marker, timeoutMs = 420_000) {
   const root = path.join(dshHome(), 'sessions', '--D-software--');
   const deadline = t0 + timeoutMs;
   let stablePolls = 0;
   let lastSize = -1;
   let lastMtime = 0;
+  let pollCount = 0;
+  let lastDebug = '';
   while (Date.now() < deadline) {
-    let newest = null;
+    pollCount += 1;
+    let candidates = [];
     try {
-      const dirs = fs
+      candidates = fs
         .readdirSync(root, { withFileTypes: true })
         .filter((d) => d.isDirectory())
-        .map((d) => ({ p: path.join(root, d.name), m: fs.statSync(path.join(root, d.name)).mtimeMs }));
-      newest = dirs.sort((a, b) => b.m - a.m)[0] ?? null;
+        .map((d) => ({ p: path.join(root, d.name), m: fs.statSync(path.join(root, d.name)).mtimeMs }))
+        .sort((a, b) => b.m - a.m)
+        .filter((d) => d.m >= t0);
     } catch {
       // sessions root not ready yet
     }
-    if (newest && newest.m >= t0) {
-      const file = sessionFileOf(newest.p);
-      if (file) {
-        try {
-          const { events } = readSessionEvents(file);
-          const hasPrompt = events.some((e) => e.type === 'user/message' && JSON.stringify(e).includes(PROMPT_MARKER));
-          const turnEnds = events.filter((e) => e.type === 'turn/end').length;
-          if (hasPrompt && turnEnds >= 1) {
-            // Wait until the artifact stops growing so the final durable
-            // batch (including turn/end) is fully flushed before we return.
-            const stat = fs.statSync(file);
-            if (stat.size === lastSize && stat.mtimeMs === lastMtime) stablePolls += 1;
-            else {
-              stablePolls = 0;
-              lastSize = stat.size;
-              lastMtime = stat.mtimeMs;
-            }
-            if (stablePolls >= 2) {
-              return { sessionDir: newest.p, sessionFile: file, events };
-            }
-          }
-        } catch {
-          // torn final frame while a batch is being written — retry
+    // Scan every session directory created after this run started (not only
+    // the newest one): the target session must be found even when unrelated
+    // concurrent activity creates fresher directories.
+    for (const candidate of candidates) {
+      const file = sessionFileOf(candidate.p);
+      if (!file) continue;
+      try {
+        const { events } = readSessionEvents(file);
+        const hasPrompt = events.some((e) => e.type === 'user/message' && JSON.stringify(e).includes(marker));
+        const turnEnds = events.filter((e) => e.type === 'turn/end').length;
+        if (process.env.DSH_VERIFY_DEBUG === '1') {
+          lastDebug = `poll ${pollCount}: dir=${path.basename(candidate.p)} events=${events.length} prompt=${hasPrompt} turnEnds=${turnEnds}`;
         }
+        if (hasPrompt && turnEnds >= 1) {
+          // Wait until the artifact stops growing so the final durable
+          // batch (including turn/end) is fully flushed before we return.
+          const stat = fs.statSync(file);
+          if (stat.size === lastSize && stat.mtimeMs === lastMtime) stablePolls += 1;
+          else {
+            stablePolls = 0;
+            lastSize = stat.size;
+            lastMtime = stat.mtimeMs;
+          }
+          if (stablePolls >= 2) {
+            return { sessionDir: candidate.p, sessionFile: file, events };
+          }
+        }
+      } catch {
+        // torn final frame while a batch is being written — retry
       }
     }
     await sleep(3000);
+  }
+  if (process.env.DSH_VERIFY_DEBUG === '1') {
+    fs.writeFileSync('.verify-debug-poll-last.txt', `${lastDebug}\n`);
+    console.log('last poll state:', lastDebug);
   }
   throw new Error('agent turn did not complete within the time budget');
 }
@@ -288,7 +307,7 @@ async function probe() {
   ws.close();
 }
 
-async function agent() {
+async function runTask({ prompt, marker, uiExpect, resultFile, timeoutMs = 420_000 }) {
   const t0 = Date.now();
   const { cdp, ws } = await connect();
   await waitForUi(cdp);
@@ -327,15 +346,25 @@ async function agent() {
   const composer1 = await composerInfo(cdp);
   console.log('composer after new session:', JSON.stringify(composer1));
 
-  // 3. Fill the read-only task and send.
-  const filled = await fillComposer(cdp, PROMPT);
+  // 3. Fill the task and send.
+  const filled = await fillComposer(cdp, prompt);
   console.log('fill composer:', filled);
+  if (process.env.DSH_VERIFY_DEBUG === '1') {
+    const value = await cdp.eval(`[...document.querySelectorAll('textarea')].map((t) => ({ ph: t.placeholder, dis: t.disabled, val: t.value.slice(0, 80) }))`);
+    console.log('composer state after fill:', JSON.stringify(value));
+  }
   await sleep(400);
   const sent = await clickAria(cdp, '发送消息');
   console.log('click 发送消息:', sent);
+  if (process.env.DSH_VERIFY_DEBUG === '1') {
+    await sleep(3000);
+    const text1 = await textOf(cdp);
+    fs.writeFileSync('.verify-debug-after-send.txt', text1);
+    console.log('UI text after send (first 400):', text1.slice(0, 400));
+  }
 
   // 4. Authoritative completion: the session log gains our prompt and a turn/end.
-  const { sessionDir, sessionFile, events } = await waitForTurnComplete(t0);
+  const { sessionDir, sessionFile, events } = await waitForTurnComplete(t0, marker, timeoutMs);
   await sleep(4000); // let the UI settle and the final batch flush
 
   const uiText = await textOf(cdp);
@@ -343,13 +372,32 @@ async function agent() {
   const result = {
     sessionDir,
     sessionFile,
-    uiShowsPrompt: uiText.includes('dsh-desktop'),
-    ...analyze(events),
+    uiShowsPrompt: uiExpect ? uiText.includes(uiExpect) : uiText.includes('dsh-desktop'),
+    ...analyze(events, marker),
   };
-  fs.writeFileSync(RESULT_FILE, JSON.stringify(result, null, 2));
+  fs.writeFileSync(resultFile, JSON.stringify(result, null, 2));
   console.log('AGENT RESULT:');
   console.log(JSON.stringify(result, null, 2));
   ws.close();
+}
+
+async function agent() {
+  await runTask({
+    prompt: PROMPT,
+    marker: PROMPT_MARKER,
+    uiExpect: 'dsh-desktop',
+    resultFile: RESULT_FILE,
+  });
+}
+
+async function longtask() {
+  await runTask({
+    prompt: LONG_TASK_PROMPT,
+    marker: LONG_TASK_MARKER,
+    uiExpect: LONG_TASK_MARKER,
+    resultFile: '.verify-longtask-result.json',
+    timeoutMs: 600_000,
+  });
 }
 
 async function persist() {
@@ -414,6 +462,7 @@ async function persist() {
 async function main() {
   if (mode === 'probe') return probe();
   if (mode === 'agent') return agent();
+  if (mode === 'longtask') return longtask();
   if (mode === 'persist') return persist();
   console.error(`unknown mode: ${mode}`);
   process.exit(2);

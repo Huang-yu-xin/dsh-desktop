@@ -19,6 +19,12 @@
 - **Loading and error pages** — staged progress while the harness boots; on failure, a page with the reason, redacted logs, Retry, and Choose Another Workspace.
 - **Recent workspaces** — the 10 most recently opened folders with one-click reopen, removal, and `(missing)` marking. Only directory paths and timestamps are stored.
 - **Clean shutdown** — quitting terminates the whole harness process tree with `taskkill /T /F`; no orphan `node.exe` or `cmd.exe` processes remain.
+- **Health monitor (V1.1)** — after the UI is up, a lightweight GET / check runs every 5 s against the harness origin only. Consecutive failures mark the state `disconnected` and show a connection-lost page; the monitor never kills a live process by itself.
+- **Crash recovery (V1.1)** — unexpected process exit, process error, and health failures are detected and classified (process exited / process error / health check failed / unexpected exit code); Restart Harness respawns the same workspace on a fresh OS-assigned port, keeping the native session store intact.
+- **Back to Workspaces (V1.1)** — returns to the workspace page from a running harness (menu `Harness` → Back to Workspaces, `Ctrl+Shift+B`) and starts another workspace through the normal spawn → readiness → load flow.
+- **Window state (V1.1)** — width, height, position, and maximized state persist in userData; off-screen coordinates fall back to a visible position.
+- **Logs viewer (V1.1)** — per-stream stdout/stderr tails with Copy Logs; credential-like patterns are redacted before anything reaches the UI.
+- **Single instance (V1.1)** — a second launch activates the existing window instead of starting a second backend.
 
 ### Prerequisites
 
@@ -46,12 +52,20 @@ Click **Open Folder**, choose a project directory, and the official Harness UI o
 | `npm run dev` | Build, then run |
 | `npm run verify` | Run the scripted minimal-loop verification |
 
+Verification scripts under `scripts/`: `verify-v11.ps1` runs the reliability
+scenario suite (crash recovery, HTTP disconnect, back-to-workspaces, window
+state, logs, single instance, IPC gate, recents — 55 checks), `check-sanitize.mjs`
+asserts the log redaction unit cases, `verify-longtask.ps1` runs the ~60 s busy
+agent simulation under the health monitor, and `verify-real-agent.ps1
+agent|persist` runs the real-agent and session-persistence regressions.
+
 ### How it works
 
 1. Pick a workspace folder, or pass `--workspace <dir>` for scripted runs.
 2. The main process spawns the pinned release `@deepseek-ai/dsh@0.1.0-rc.6` (see [`src/main/config.ts`](src/main/config.ts)) through npm's `npx-cli.js` under the system Node, with the workspace as `cwd` and the fixed arguments `dsh web --host 127.0.0.1 --port 0`.
 3. Readiness is the official stdout line `dsh web: http://127.0.0.1:<port>`, followed by an HTTP 200 check; only then does the window load `http://127.0.0.1:<port>`.
 4. On quit, the harness process tree is terminated with `taskkill /T /F`.
+5. While the UI is up, the health monitor polls GET / every 5 s (2 s timeout). Three consecutive failures mark the state `disconnected` — the Desktop shows the connection-lost page with Restart Harness / Show Logs / Back to Workspaces, but never kills the live process itself. Unexpected process exit is detected through `exit`/`close`/`error` and classified into a reason.
 
 ### Project structure
 
@@ -90,6 +104,7 @@ scripts/                   build helper and end-to-end verification scripts
 - First launch downloads the full pinned dependency graph; later launches reuse the npx cache.
 - The pinned release is `0.1.0-rc.6`; upgrades are deliberate version bumps.
 - Termination is forceful (`taskkill /F`): on Windows the harness's graceful-disposal path is unreachable from outside, matching the official behavior.
+- The health monitor detects only — it does not auto-recover a recovered HTTP endpoint after `disconnected`; the user restarts via the lost page.
 - Installer/portable packaging is not wired up yet; the distribution investigation documents a recommended plan.
 
 ### Not in V1
@@ -111,6 +126,12 @@ Rebuilding the Harness UI, custom plugins, auto-update, MCP/skills managers, mul
 - **加载页与错误页** — 启动过程中分阶段显示进度；失败时展示原因、脱敏日志、Retry 与 Choose Another Workspace。
 - **最近工作区** — 保存最近打开的 10 个目录：一键重新打开、可移除、路径失效时标注 `(missing)`；只存目录路径与时间戳。
 - **干净退出** — 退出时用 `taskkill /T /F` 终止整个 Harness 进程树，不残留孤儿 `node.exe` 或 `cmd.exe` 进程。
+- **健康监控（V1.1）** — UI 就绪后每 5 秒对 Harness origin 做一次轻量 GET / 检查。连续失败进入 `disconnected` 状态并显示连接丢失页；监控**只检测**，绝不会自行杀掉仍然存活的进程。
+- **崩溃恢复（V1.1）** — 意外进程退出、进程错误与健康检查失败均被检测并按类别归因（进程退出 / 进程错误 / 健康检查失败 / 意外退出码）；Restart Harness 在同一工作区、新的 OS 分配端口上重启，Harness 原生会话数据完整保留。
+- **返回工作区列表（V1.1）** — 运行中可通过菜单 `Harness` → Back to Workspaces（`Ctrl+Shift+B`）返回工作区页，再经完整的 spawn → 就绪 → 加载流程打开另一个工作区。
+- **窗口状态（V1.1）** — 尺寸、位置、最大化状态保存在 userData；屏幕外坐标自动回退到可见位置。
+- **日志查看器（V1.1）** — stdout/stderr 分路展示，支持 Copy Logs；凭据类模式在进入 UI 前一律脱敏。
+- **单实例（V1.1）** — 第二次启动只会激活已有窗口，不会创建第二个后端。
 
 ### 前置要求
 
@@ -138,12 +159,19 @@ npm run dev   # 构建并启动
 | `npm run dev` | 构建后运行 |
 | `npm run verify` | 运行脚本化的最小闭环验证 |
 
+`scripts/` 下的验证脚本：`verify-v11.ps1` 运行可靠性场景套件（崩溃恢复、
+HTTP 断连、返回工作区、窗口状态、日志、单实例、IPC 门禁、最近工作区，
+共 55 项检查），`check-sanitize.mjs` 断言日志脱敏用例，`verify-longtask.ps1`
+在健康监控全程运行时执行约 60 秒的忙碌 Agent 模拟，`verify-real-agent.ps1
+agent|persist` 执行真实 Agent 与会话持久化回归。
+
 ### 工作原理
 
 1. 选择一个工作区目录（脚本化运行时也可传 `--workspace <dir>`）。
 2. 主进程以工作区为 `cwd`，通过系统 Node 运行 npm 的 `npx-cli.js`，启动固定版本 `@deepseek-ai/dsh@0.1.0-rc.6`（见 [`src/main/config.ts`](src/main/config.ts)），参数固定为 `dsh web --host 127.0.0.1 --port 0`。
 3. 就绪判据是官方 stdout 行 `dsh web: http://127.0.0.1:<port>`，再加一次 HTTP 200 确认；通过后窗口才加载 `http://127.0.0.1:<port>`。
 4. 退出时用 `taskkill /T /F` 终止 Harness 进程树。
+5. UI 运行期间，健康监控每 5 秒轮询一次 GET /（单次 2 秒超时）。连续三次失败进入 `disconnected` 状态——桌面端显示连接丢失页（Restart Harness / Show Logs / Back to Workspaces），但绝不自行杀掉存活的进程。意外进程退出通过 `exit`/`close`/`error` 监听检测并归类原因。
 
 ### 项目结构
 
@@ -182,6 +210,7 @@ scripts/                   构建辅助与端到端验证脚本
 - 首次启动需下载完整依赖图；之后启动复用 npx 缓存。
 - 固定版本为 `0.1.0-rc.6`；升级是显式的版本变更。
 - 进程终止是强制的（`taskkill /F`）：Windows 上从外部无法触达 Harness 的优雅释放路径，这与官方行为一致。
+- 健康监控只做检测：`disconnected` 后即使 HTTP 恢复也不会自动切回；由用户经丢失页手动重启。
 - 安装包/便携版打包尚未接入；分发调查报告记录了推荐方案。
 
 ### 不属于 V1 的内容

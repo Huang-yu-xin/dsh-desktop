@@ -1,4 +1,4 @@
-/* Minimal three-state shell page: Choose / Loading / Error. */
+/* Minimal shell page: Choose / Loading / Error / Connection Lost + logs panel. */
 :root {
   color-scheme: dark;
   --bg: #101216;
@@ -163,4 +163,33 @@ button:hover {
   padding: 2px 10px;
   font-size: 16px;
   line-height: 1.2;
+}
+
+#logs-panel {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 24px 32px;
+  overflow: hidden;
+}
+
+#logs-panel.hidden {
+  display: none;
+}
+
+.logs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#logs-panel .logs {
+  flex: 1;
+  min-height: 80px;
+  max-height: none;
+  overflow: auto;
 }

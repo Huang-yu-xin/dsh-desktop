@@ -35,11 +35,38 @@
         <div class="row">
           <button id="btn-retry">Retry</button>
           <button id="btn-choose-another">Choose Another Workspace</button>
-          <button id="btn-toggle-logs">Show Logs</button>
+          <button id="btn-show-logs">Show Logs</button>
         </div>
-        <pre id="error-logs" class="logs hidden"></pre>
+      </section>
+
+      <section id="view-lost" class="view hidden">
+        <h1>DeepSeek Harness connection lost</h1>
+        <p class="sub">Workspace:</p>
+        <p id="lost-workspace" class="mono"></p>
+        <p class="sub">Reason:</p>
+        <p id="lost-reason" class="mono error-text"></p>
+        <div class="row">
+          <button id="btn-restart">Restart Harness</button>
+          <button id="btn-show-logs-lost">Show Logs</button>
+          <button id="btn-back">Back to Workspaces</button>
+        </div>
       </section>
     </main>
+
+    <div id="logs-panel" class="hidden">
+      <div class="logs-header">
+        <strong>Harness Logs</strong>
+        <div class="row">
+          <button id="btn-copy-logs">Copy Logs</button>
+          <button id="btn-close-logs">Close</button>
+        </div>
+      </div>
+      <p class="hint">stdout</p>
+      <pre id="logs-stdout" class="logs"></pre>
+      <p class="hint">stderr</p>
+      <pre id="logs-stderr" class="logs"></pre>
+    </div>
+
     <script src="./app.js"></script>
   </body>
 </html>

@@ -1,4 +1,5 @@
-// Shell page logic: renders Choose / Loading / Error from main-process state.
+// Shell page logic: renders Choose / Loading / Error / Connection Lost from
+// main-process state, plus the minimal logs panel (stdout/stderr, copy, close).
 (() => {
   const api = window.dshDesktop;
 
@@ -12,6 +13,7 @@
     choose: $('view-choose'),
     starting: $('view-starting'),
     error: $('view-error'),
+    lost: $('view-lost'),
   };
 
   function show(view: keyof typeof views): void {
@@ -26,6 +28,31 @@
     'awaiting-http': 'Harness is up — confirming HTTP…',
     stopping: 'Stopping harness…',
   };
+
+  const reasonLabels: Record<string, string> = {
+    'startup-failed': 'Startup failed',
+    'process-exited': 'Process exited',
+    'process-error': 'Process error',
+    'unexpected-exit-code': 'Unexpected exit code',
+    'health-check-failed': 'Health check failed',
+    unknown: 'Unknown',
+  };
+
+  // Kinds that mean "the runtime was lost after it had been running" — these
+  // get the connection-lost page; startup kinds get the failed-to-start page.
+  const runtimeLossKinds = new Set(['process-exited', 'process-error', 'health-check-failed']);
+
+  function reasonText(reason: DesktopReason | null): string {
+    if (reason === null) return 'unknown error';
+    const label = reasonLabels[reason.kind] ?? reason.kind;
+    return `${label}: ${reason.message}`;
+  }
+
+  function showLost(state: DesktopState): void {
+    $('lost-workspace').textContent = state.workspace ?? '(none)';
+    $('lost-reason').textContent = reasonText(state.reason);
+    show('lost');
+  }
 
   function renderRecents(recents: RecentItem[]): void {
     const wrap = $('recents');
@@ -71,10 +98,15 @@
 
   function apply(state: DesktopState): void {
     if (state.phase === 'failed') {
-      $('error-workspace').textContent = state.workspace ?? '(none)';
-      $('error-reason').textContent = state.error ?? 'unknown error';
-      $('error-logs').textContent = state.logTail || '(no output captured)';
-      show('error');
+      if (state.reason !== null && runtimeLossKinds.has(state.reason.kind)) {
+        showLost(state);
+      } else {
+        $('error-workspace').textContent = state.workspace ?? '(none)';
+        $('error-reason').textContent = reasonText(state.reason);
+        show('error');
+      }
+    } else if (state.phase === 'disconnected') {
+      showLost(state);
     } else if (state.phase === 'idle') {
       renderRecents(state.recents);
       show('choose');
@@ -88,6 +120,13 @@
   function showChooseError(message: string): void {
     $('choose-error').textContent = message;
     $('choose-error').classList.remove('hidden');
+  }
+
+  async function openLogsPanel(): Promise<void> {
+    const logs = await api.getLogs();
+    $('logs-stdout').textContent = logs.stdout || '(no stdout captured)';
+    $('logs-stderr').textContent = logs.stderr || '(no stderr captured)';
+    $('logs-panel').classList.remove('hidden');
   }
 
   $('btn-open').addEventListener('click', () => {
@@ -107,18 +146,32 @@
     void api.retry();
   });
 
+  $('btn-restart').addEventListener('click', () => {
+    void api.restart();
+  });
+
+  $('btn-back').addEventListener('click', () => {
+    void api.backToWorkspaces();
+  });
+
   $('btn-choose-another').addEventListener('click', () => {
     void api.chooseAnother();
   });
 
-  $('btn-toggle-logs').addEventListener('click', () => {
-    const logs = $('error-logs');
-    logs.classList.toggle('hidden');
-    if (!logs.classList.contains('hidden')) {
-      void api.getState().then((state) => {
-        logs.textContent = state.logTail || '(no output captured)';
-      });
-    }
+  $('btn-show-logs').addEventListener('click', () => {
+    void openLogsPanel();
+  });
+
+  $('btn-show-logs-lost').addEventListener('click', () => {
+    void openLogsPanel();
+  });
+
+  $('btn-close-logs').addEventListener('click', () => {
+    $('logs-panel').classList.add('hidden');
+  });
+
+  $('btn-copy-logs').addEventListener('click', () => {
+    void api.copyLogs();
   });
 
   api.onState(apply);

@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { HARNESS_ARGS, HARNESS_BIN, HARNESS_PACKAGE_SPEC } from './config';
+import { HARNESS_ARGS, HARNESS_BIN, HARNESS_PACKAGE_SPEC, TASKKILL_TIMEOUT_MS } from './config';
 
 /** The system toolchain the harness runs under (never Electron's own Node). */
 export interface NodeToolchain {
@@ -65,17 +65,39 @@ export function spawnHarness(toolchain: NodeToolchain, workspace: string): Child
   return spawn(toolchain.npmCmdPath, npxArgs, options);
 }
 
+/** Outcome of a tree termination attempt, for controller-side logging. */
+export interface KillResult {
+  ok: boolean;
+  detail: string;
+}
+
 /**
  * Terminate a process tree. taskkill /T /F is the verified-clean way on
  * Windows: it kills the target plus every descendant (npx node, cmd shims,
- * the dsh node process and any agents it spawned).
+ * the dsh node process and any agents it spawned). The subprocess itself is
+ * bounded by a timeout, so a wedged taskkill can never hang the desktop app.
  *
  * @param pid - root process id of the tree.
  */
-export function killProcessTree(pid: number): Promise<void> {
+export function killProcessTree(pid: number, timeoutMs = TASKKILL_TIMEOUT_MS): Promise<KillResult> {
   return new Promise((resolve) => {
     const killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    killer.once('error', () => resolve());
-    killer.once('exit', () => resolve());
+    let settled = false;
+    const finish = (result: KillResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      killer.kill();
+      finish({ ok: false, detail: `taskkill timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    killer.once('error', (err) => {
+      finish({ ok: false, detail: `taskkill spawn error: ${err.message}` });
+    });
+    killer.once('exit', (code) => {
+      finish(code === 0 ? { ok: true, detail: 'taskkill exit 0' } : { ok: false, detail: `taskkill exit ${code ?? '?'}` });
+    });
   });
 }

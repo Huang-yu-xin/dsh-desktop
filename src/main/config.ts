@@ -28,8 +28,26 @@ export const HTTP_CONFIRM_TIMEOUT_MS = 15_000;
 /** Poll interval for the HTTP confirmation loop. */
 export const HTTP_POLL_INTERVAL_MS = 500;
 
-/** Hard cap on retained harness stdout/stderr (the tail is kept). */
+/** Hard cap on retained harness stdout/stderr (the tail is kept, per stream). */
 export const MAX_CAPTURED_LOG_CHARS = 262_144;
 
 /** Node range the official CLI documents (repo `engines`). */
 export const REQUIRED_NODE_RANGE = '^22.19.0 || >=24.0.0';
+
+/** Interval between post-ready health checks (GET / on the harness origin). */
+export const HEALTH_CHECK_INTERVAL_MS = 5_000;
+
+/** Per-request timeout for one health check. */
+export const HEALTH_CHECK_TIMEOUT_MS = 2_000;
+
+/** Consecutive failures required before the state becomes `disconnected`. */
+export const HEALTH_FAIL_THRESHOLD = 3;
+
+/** Upper bound for waiting on the child to exit after taskkill. */
+export const STOP_WAIT_TIMEOUT_MS = 10_000;
+
+/** Upper bound for the taskkill subprocess itself. */
+export const TASKKILL_TIMEOUT_MS = 5_000;
+
+/** Hard cap for the whole quit-time stop() before the app exits anyway. */
+export const QUIT_STOP_TIMEOUT_MS = 15_000;
