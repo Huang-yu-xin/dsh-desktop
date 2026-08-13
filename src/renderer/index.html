@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data:" />
+    <title>DeepSeek Harness Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="app">
+      <section id="view-choose" class="view hidden">
+        <h1>DeepSeek Harness Desktop</h1>
+        <p class="sub">Choose a workspace to start.</p>
+        <button id="btn-open">Open Folder</button>
+        <div id="recents" class="hidden">
+          <p class="sub">Recent Workspaces</p>
+          <ul id="recents-list"></ul>
+        </div>
+        <p id="choose-error" class="error-text hidden"></p>
+      </section>
+
+      <section id="view-starting" class="view hidden">
+        <h1>Starting DeepSeek Harness…</h1>
+        <p class="sub">Workspace:</p>
+        <p id="starting-workspace" class="mono"></p>
+        <p id="starting-phase" class="hint"></p>
+      </section>
+
+      <section id="view-error" class="view hidden">
+        <h1>DeepSeek Harness failed to start.</h1>
+        <p class="sub">Workspace:</p>
+        <p id="error-workspace" class="mono"></p>
+        <p class="sub">Reason:</p>
+        <p id="error-reason" class="mono error-text"></p>
+        <div class="row">
+          <button id="btn-retry">Retry</button>
+          <button id="btn-choose-another">Choose Another Workspace</button>
+          <button id="btn-toggle-logs">Show Logs</button>
+        </div>
+        <pre id="error-logs" class="logs hidden"></pre>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

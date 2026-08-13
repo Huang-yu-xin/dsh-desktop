@@ -1,0 +1,19 @@
+{
+  "name": "dsh-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness Desktop — the official DeepSeek Harness Web UI wrapped in a native Windows app",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.cjs",
+    "start": "electron .",
+    "dev": "npm run build && electron .",
+    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-loop.ps1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "electron": "43.4.0",
+    "typescript": "5.9.3",
+    "ws": "^8.21.3"
+  }
+}

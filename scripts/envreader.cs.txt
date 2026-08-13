@@ -1,0 +1,74 @@
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class NativeEnvRow {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationProcess(IntPtr h, int cls, ref PBI info, int len, out int retLen);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, [Out] byte[] buf, IntPtr len, out IntPtr read);
+    [StructLayout(LayoutKind.Sequential)]
+    struct PBI {
+        public IntPtr ExitStatus;
+        public IntPtr PebBaseAddress;
+        public IntPtr AffinityMask;
+        public IntPtr BasePriority;
+        public UIntPtr UniqueProcessId;
+        public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    // Reads ONLY the real environment block: parsing stops at the empty entry
+    // (four zero bytes on a UTF-16 char boundary) that terminates the block.
+    public static Dictionary<string, string> Read(int pid) {
+        var result = new Dictionary<string, string>();
+        IntPtr h = OpenProcess(0x0410, false, pid);
+        if (h == IntPtr.Zero) return result;
+        try {
+            var pbi = new PBI();
+            int ret;
+            if (NtQueryInformationProcess(h, 0, ref pbi, Marshal.SizeOf(pbi), out ret) != 0) return result;
+            byte[] b8 = new byte[8];
+            IntPtr rd;
+            if (!ReadProcessMemory(h, IntPtr.Add(pbi.PebBaseAddress, 0x20), b8, (IntPtr)8, out rd)) return result;
+            IntPtr pp = new IntPtr(BitConverter.ToInt64(b8, 0));
+            if (!ReadProcessMemory(h, IntPtr.Add(pp, 0x80), b8, (IntPtr)8, out rd)) return result;
+            IntPtr env = new IntPtr(BitConverter.ToInt64(b8, 0));
+            if (env == IntPtr.Zero) return result;
+            var data = new List<byte>();
+            IntPtr cur = env;
+            bool done = false;
+            while (data.Count < 262144 && !done) {
+                byte[] chunk = new byte[4096];
+                if (!ReadProcessMemory(h, cur, chunk, (IntPtr)4096, out rd)) break;
+                int n = rd.ToInt32();
+                if (n == 0) break;
+                for (int i = 0; i < n; i++) data.Add(chunk[i]);
+                for (int i = 0; i + 3 < data.Count; i++) {
+                    if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 0 && i % 2 == 0) {
+                        data.RemoveRange(i, data.Count - i);
+                        done = true;
+                        break;
+                    }
+                }
+                cur = IntPtr.Add(cur, n);
+            }
+            string s = Encoding.Unicode.GetString(data.ToArray());
+            foreach (var pair in s.Split('\0')) {
+                if (pair.Length == 0) continue;
+                int eq = pair.IndexOf('=');
+                if (eq <= 0) continue;
+                string name = pair.Substring(0, eq);
+                string val = pair.Substring(eq + 1);
+                if (!result.ContainsKey(name)) result[name] = val;
+            }
+        } finally {
+            CloseHandle(h);
+        }
+        return result;
+    }
+}
