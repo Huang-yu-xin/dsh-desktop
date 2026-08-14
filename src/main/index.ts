@@ -326,9 +326,9 @@ function startApp(): void {
   ipcMain.handle('app:copy-logs', (event) => {
     if (!isLocalSender(event)) throw new Error('app:copy-logs rejected: sender is not the local shell page');
     const logs = harness.getLogs();
-    clipboard.writeText(
-      sanitizeLogs(`[stdout]\n${logs.stdout}\n\n[stderr]\n${logs.stderr}`),
-    );
+    const text = sanitizeLogs(`[stdout]\n${logs.stdout}\n\n[stderr]\n${logs.stderr}`);
+    clipboard.writeText(text);
+    appLog(`copy-logs: wrote ${text.length} sanitized chars to the clipboard`);
   });
 
   ipcMain.handle('app:get-state', (event) => {

@@ -25,12 +25,14 @@
 - **Window state (V1.1)** — width, height, position, and maximized state persist in userData; off-screen coordinates fall back to a visible position.
 - **Logs viewer (V1.1)** — per-stream stdout/stderr tails with Copy Logs; credential-like patterns are redacted before anything reaches the UI.
 - **Single instance (V1.1)** — a second launch activates the existing window instead of starting a second backend.
+- **Bundled offline runtime (V1.2)** — the pinned Harness release ships inside the app as a production dependency and runs on Electron's own embedded Node (`ELECTRON_RUN_AS_NODE=1`); the packaged app needs no Node.js, npm, or npx, and never touches the npm registry.
+- **Windows artifacts (V1.2)** — `win-unpacked`, a portable exe, an NSIS installer, and a zip of the unpacked build (see `release/`).
 
 ### Prerequisites
 
 - Windows x64.
-- Node.js `^22.19.0 || >=24.0.0` installed system-wide, so `node`, `npm`, and `npx` are on PATH.
-- Network access on first launch: npx downloads the pinned harness release once (several minutes on a cold machine) and then reuses its cache.
+- **Packaged app (V1.2): nothing else** — no Node.js, npm, npx, or PowerShell required; the first launch performs no downloads.
+- Development builds additionally need Node.js `^22.19.0 || >=24.0.0` (system-wide) and npm.
 - The DeepSeek API key stays inside Harness's own credential store (configured in the Harness UI, stored under `$DSH_HOME/.credentials.yaml`); this app never manages keys.
 
 ### Quick start
@@ -51,6 +53,8 @@ Click **Open Folder**, choose a project directory, and the official Harness UI o
 | `npm start` | Run the built app |
 | `npm run dev` | Build, then run |
 | `npm run verify` | Run the scripted minimal-loop verification |
+| `npm run stage` | Assemble the production dependency tree for packaging (`release-stage/`) |
+| `npm run dist` | Build, stage, and package Windows artifacts (`release/`) |
 
 Verification scripts under `scripts/`: `verify-v11.ps1` runs the reliability
 scenario suite (crash recovery, HTTP disconnect, back-to-workspaces, window
@@ -62,7 +66,7 @@ agent|persist` runs the real-agent and session-persistence regressions.
 ### How it works
 
 1. Pick a workspace folder, or pass `--workspace <dir>` for scripted runs.
-2. The main process spawns the pinned release `@deepseek-ai/dsh@0.1.0-rc.6` (see [`src/main/config.ts`](src/main/config.ts)) through npm's `npx-cli.js` under the system Node, with the workspace as `cwd` and the fixed arguments `dsh web --host 127.0.0.1 --port 0`.
+2. The main process spawns the pinned release `@deepseek-ai/dsh@0.1.0-rc.6` (see [`src/main/config.ts`](src/main/config.ts)) from the bundled dependency tree through Electron's own embedded Node (`process.execPath` + `ELECTRON_RUN_AS_NODE=1` + `--expose-internals`, required so the official loader can reach Node internals on this runtime), with the workspace as `cwd` and the fixed arguments `dsh web --host 127.0.0.1 --port 0`. npm/npx are never used at runtime; a missing bundled runtime produces a local error page, never a fallback download.
 3. Readiness is the official stdout line `dsh web: http://127.0.0.1:<port>`, followed by an HTTP 200 check; only then does the window load `http://127.0.0.1:<port>`.
 4. On quit, the harness process tree is terminated with `taskkill /T /F`.
 5. While the UI is up, the health monitor polls GET / every 5 s (2 s timeout). Three consecutive failures mark the state `disconnected` — the Desktop shows the connection-lost page with Restart Harness / Show Logs / Back to Workspaces, but never kills the live process itself. Unexpected process exit is detected through `exit`/`close`/`error` and classified into a reason.
@@ -100,12 +104,12 @@ scripts/                   build helper and end-to-end verification scripts
 
 ### Known limitations
 
-- Requires a system Node.js/npm install (not bundled).
-- First launch downloads the full pinned dependency graph; later launches reuse the npx cache.
+- Development builds require a system Node.js/npm install; the packaged app does not.
 - The pinned release is `0.1.0-rc.6`; upgrades are deliberate version bumps.
 - Termination is forceful (`taskkill /F`): on Windows the harness's graceful-disposal path is unreachable from outside, matching the official behavior.
 - The health monitor detects only — it does not auto-recover a recovered HTTP endpoint after `disconnected`; the user restarts via the lost page.
-- Installer/portable packaging is not wired up yet; the distribution investigation documents a recommended plan.
+- The portable exe re-extracts its payload on every launch (≈1 minute on a normal machine; antivirus scanning can extend this). The installer and the zip of `win-unpacked` avoid per-launch extraction.
+- Artifacts are unsigned: Windows SmartScreen shows "Unknown publisher" until a code-signing certificate is configured for public release.
 
 ### Not in V1
 
@@ -132,12 +136,14 @@ Rebuilding the Harness UI, custom plugins, auto-update, MCP/skills managers, mul
 - **窗口状态（V1.1）** — 尺寸、位置、最大化状态保存在 userData；屏幕外坐标自动回退到可见位置。
 - **日志查看器（V1.1）** — stdout/stderr 分路展示，支持 Copy Logs；凭据类模式在进入 UI 前一律脱敏。
 - **单实例（V1.1）** — 第二次启动只会激活已有窗口，不会创建第二个后端。
+- **内置离线运行时（V1.2）** — 固定版本的 Harness 作为 production dependency 随应用分发，并在 Electron 自带 Node（`ELECTRON_RUN_AS_NODE=1`）上运行；打包后的应用不需要 Node.js、npm 或 npx，也从不访问 npm registry。
+- **Windows 产物（V1.2）** — `win-unpacked`、portable exe、NSIS 安装器以及 unpacked 构建的 zip 包（见 `release/`）。
 
 ### 前置要求
 
 - Windows x64。
-- 系统级安装 Node.js `^22.19.0 || >=24.0.0`，使 `node`、`npm`、`npx` 都在 PATH 中。
-- 首次启动需要网络：npx 一次性下载固定版本的 Harness 及其依赖（冷机器上需数分钟），之后复用 npx 缓存。
+- **打包后的应用（V1.2）：无其它要求** — 不需要 Node.js、npm、npx 或 PowerShell；首次启动不进行任何下载。
+- 开发构建额外需要系统级 Node.js `^22.19.0 || >=24.0.0` 与 npm。
 - DeepSeek API Key 保留在 Harness 自己的凭据存储中（在 Harness UI 内配置，存放于 `$DSH_HOME/.credentials.yaml`）；本应用不管理任何密钥。
 
 ### 快速开始
@@ -158,6 +164,8 @@ npm run dev   # 构建并启动
 | `npm start` | 运行已构建的应用 |
 | `npm run dev` | 构建后运行 |
 | `npm run verify` | 运行脚本化的最小闭环验证 |
+| `npm run stage` | 组装打包用的 production 依赖树（`release-stage/`） |
+| `npm run dist` | 构建、staging 并打包 Windows 产物（`release/`） |
 
 `scripts/` 下的验证脚本：`verify-v11.ps1` 运行可靠性场景套件（崩溃恢复、
 HTTP 断连、返回工作区、窗口状态、日志、单实例、IPC 门禁、最近工作区，
@@ -168,7 +176,7 @@ agent|persist` 执行真实 Agent 与会话持久化回归。
 ### 工作原理
 
 1. 选择一个工作区目录（脚本化运行时也可传 `--workspace <dir>`）。
-2. 主进程以工作区为 `cwd`，通过系统 Node 运行 npm 的 `npx-cli.js`，启动固定版本 `@deepseek-ai/dsh@0.1.0-rc.6`（见 [`src/main/config.ts`](src/main/config.ts)），参数固定为 `dsh web --host 127.0.0.1 --port 0`。
+2. 主进程从内置依赖树启动固定版本 `@deepseek-ai/dsh@0.1.0-rc.6`（见 [`src/main/config.ts`](src/main/config.ts)）：以 Electron 自带 Node（`process.execPath` + `ELECTRON_RUN_AS_NODE=1` + `--expose-internals`，后者是该运行时下官方 Loader 触达 Node 内部模块所必需）运行，工作区为 `cwd`，参数固定为 `dsh web --host 127.0.0.1 --port 0`。运行期从不使用 npm/npx；内置运行时缺失时进入本地错误页，绝不回退到下载。
 3. 就绪判据是官方 stdout 行 `dsh web: http://127.0.0.1:<port>`，再加一次 HTTP 200 确认；通过后窗口才加载 `http://127.0.0.1:<port>`。
 4. 退出时用 `taskkill /T /F` 终止 Harness 进程树。
 5. UI 运行期间，健康监控每 5 秒轮询一次 GET /（单次 2 秒超时）。连续三次失败进入 `disconnected` 状态——桌面端显示连接丢失页（Restart Harness / Show Logs / Back to Workspaces），但绝不自行杀掉存活的进程。意外进程退出通过 `exit`/`close`/`error` 监听检测并归类原因。
@@ -206,12 +214,12 @@ scripts/                   构建辅助与端到端验证脚本
 
 ### 已知限制
 
-- 需要目标机安装系统 Node.js/npm（未内置）。
-- 首次启动需下载完整依赖图；之后启动复用 npx 缓存。
+- 开发构建需要系统 Node.js/npm；打包后的应用不需要。
 - 固定版本为 `0.1.0-rc.6`；升级是显式的版本变更。
 - 进程终止是强制的（`taskkill /F`）：Windows 上从外部无法触达 Harness 的优雅释放路径，这与官方行为一致。
 - 健康监控只做检测：`disconnected` 后即使 HTTP 恢复也不会自动切回；由用户经丢失页手动重启。
-- 安装包/便携版打包尚未接入；分发调查报告记录了推荐方案。
+- portable exe 每次启动都要重新解压载荷（正常机器约 1 分钟，杀毒软件扫描会延长）；安装器与 `win-unpacked` 的 zip 包无逐次解压成本。
+- 产物未签名：配置代码签名证书前，Windows SmartScreen 会显示"未知发布者"。
 
 ### 不属于 V1 的内容
 

@@ -1,0 +1,34 @@
+appId: io.github.huangyuxin.dsh-desktop
+productName: DeepSeek Harness Desktop
+directories:
+  output: release
+  buildResources: assets
+files:
+  - dist/**
+  - package.json
+  - "!**/*.map"
+  - "!node_modules/**"
+asar: true
+npmRebuild: false
+buildDependenciesFromSource: false
+# The harness runs as an external Node-mode child: its complete production
+# dependency tree ships as REAL files under resources/dsh-runtime (assembled
+# by scripts/stage-runtime.cjs with the official npm resolver — the builder's
+# own node_modules collector is bypassed because it mis-prunes this graph).
+extraResources:
+  - from: release-stage/node_modules
+    to: dsh-runtime/node_modules
+win:
+  icon: assets/icon.png
+  target:
+    - target: portable
+      arch: [x64]
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  artifactName: DSH-Desktop-${version}-setup.exe
+portable:
+  artifactName: DSH-Desktop-${version}-portable.exe

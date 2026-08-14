@@ -1,68 +1,37 @@
 /**
- * Windows process plumbing: locate the system Node/npm toolchain, spawn the
- * pinned harness package through npm's own npx-cli.js, and terminate the
- * whole process tree with taskkill /T /F.
+ * Windows process plumbing for the B1 runtime: spawn the pinned harness
+ * through Electron's embedded Node (ELECTRON_RUN_AS_NODE=1, no npm/npx/no
+ * system Node), and terminate the whole process tree with taskkill /T /F.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { HARNESS_ARGS, HARNESS_BIN, HARNESS_PACKAGE_SPEC, TASKKILL_TIMEOUT_MS } from './config';
-
-/** The system toolchain the harness runs under (never Electron's own Node). */
-export interface NodeToolchain {
-  /** Absolute path of the system node.exe. */
-  nodePath: string;
-  /** Absolute path of npm.cmd (used as a fallback spawn entry). */
-  npmCmdPath: string;
-  /** Absolute path of npm's npx-cli.js, or null when npm's layout differs. */
-  npxCliPath: string | null;
-}
+import { HARNESS_ARGS, TASKKILL_TIMEOUT_MS } from './config';
+import { harnessEnv } from './runtime';
+import type { HarnessRuntime } from './runtime';
 
 /**
- * Resolve Node/npm from PATH (Explorer-launched Electron still inherits the
- * machine PATH, so this works from a packaged app too). Returns null when
- * Node.js/npm is not installed — the caller turns that into a clear error.
- */
-export function findNodeToolchain(): NodeToolchain | null {
-  const where = spawnSync('where.exe', ['npm'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
-  if (where.error !== undefined || where.status !== 0 || typeof where.stdout !== 'string') return null;
-  const npmCmd = where.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => /\.cmd$/i.test(line));
-  if (npmCmd === undefined) return null;
-  const nodeDir = dirname(npmCmd);
-  const nodePath = join(nodeDir, 'node.exe');
-  if (!existsSync(nodePath)) return null;
-  const npxCliPath = join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
-  return { nodePath, npmCmdPath: npmCmd, npxCliPath: existsSync(npxCliPath) ? npxCliPath : null };
-}
-
-/**
- * Spawn the harness with a fixed argv (never built from user/renderer input).
- * Primary path runs npm's npx-cli.js under the system node.exe — no cmd.exe
- * wrapper, so the returned pid is the real node process at the tree root.
- * Fallback spawns npx.cmd directly; our args carry no spaces or quotes, so
- * Node's built-in cmd wrapping stays safe.
+ * Spawn the harness with a fixed argv (never built from user/renderer input)
+ * under Electron's own Node runtime. The executable is the Electron binary
+ * itself; ELECTRON_RUN_AS_NODE switches it into plain Node mode.
  *
- * @param toolchain - resolved system toolchain.
+ * `--expose-internals` is required by the official dsh loader on this
+ * runtime: under system Node its node-addon-require-builtin addon can reach
+ * Node internals, but Electron's Node mode lacks the embedder symbol that
+ * addon needs. With the flag, the loader's own createRequire path resolves
+ * `internal/modules/esm/loader` exactly as designed.
+ *
+ * @param runtime - resolved bundled runtime (executable + bin path).
  * @param workspace - the user-chosen directory used as the child's cwd.
  * @returns the spawned process (stdout/stderr piped; stdin ignored; console window hidden).
  */
-export function spawnHarness(toolchain: NodeToolchain, workspace: string): ChildProcess {
-  const harnessArgs = [HARNESS_BIN, ...HARNESS_ARGS];
-  const npxArgs = ['--yes', `--package=${HARNESS_PACKAGE_SPEC}`, '--', ...harnessArgs];
+export function spawnHarness(runtime: HarnessRuntime, workspace: string): ChildProcess {
   const options: SpawnOptions = {
     cwd: workspace,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', npm_config_update_notifier: 'false' },
+    env: { ...process.env, ...harnessEnv() },
   };
-  if (toolchain.npxCliPath !== null) {
-    return spawn(toolchain.nodePath, [toolchain.npxCliPath, ...npxArgs], options);
-  }
-  return spawn(toolchain.npmCmdPath, npxArgs, options);
+  return spawn(runtime.executablePath, ['--expose-internals', runtime.binPath, ...HARNESS_ARGS], options);
 }
 
 /** Outcome of a tree termination attempt, for controller-side logging. */
@@ -73,9 +42,8 @@ export interface KillResult {
 
 /**
  * Terminate a process tree. taskkill /T /F is the verified-clean way on
- * Windows: it kills the target plus every descendant (npx node, cmd shims,
- * the dsh node process and any agents it spawned). The subprocess itself is
- * bounded by a timeout, so a wedged taskkill can never hang the desktop app.
+ * Windows: it kills the target plus every descendant. The subprocess itself
+ * is bounded by a timeout, so a wedged taskkill can never hang the desktop.
  *
  * @param pid - root process id of the tree.
  */

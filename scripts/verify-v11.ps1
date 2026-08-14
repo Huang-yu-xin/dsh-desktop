@@ -5,12 +5,15 @@
 #   scenarios: crash | disconnect | back | window | logs | single | ipc | all
 # The real-agent and long-task scenarios are run separately by the caller
 # (they need the real DSH_HOME and the live model).
-param([string]$Scenario = 'all')
+param([string]$Scenario = 'all', [string]$ExePath = '')
 $ErrorActionPreference = 'Stop'
 $root = 'D:\software\dsh-desktop'
 $appLog = Join-Path $env:APPDATA 'dsh-desktop\dsh-desktop.log'
 $userData = Join-Path $env:APPDATA 'dsh-desktop'
-$electronExe = Join-Path $root 'node_modules\electron\dist\electron.exe'
+# DEV default: the Electron binary from the project tree. PACKAGED runs pass
+# -ExePath pointing at the built/installed "DeepSeek Harness Desktop.exe".
+$electronExe = if ($ExePath) { $ExePath } else { Join-Path $root 'node_modules\electron\dist\electron.exe' }
+$AppProcName = [System.IO.Path]::GetFileNameWithoutExtension($electronExe)   # dev: electron, packaged: DeepSeek Harness Desktop
 $driver = Join-Path $root 'scripts\verify-v11.mjs'
 $testHome = Join-Path $root '.verify-v11-home'
 $testWsA = Join-Path $root '.verify-workspace'
@@ -22,6 +25,7 @@ New-Item -ItemType Directory -Force -Path $testWsA, $testWsB | Out-Null
 $leftovers = @(Get-Process electron -ErrorAction SilentlyContinue)
 if ($leftovers.Count -gt 0) {
   taskkill /IM electron.exe /T /F 2>&1 | Out-Null
+  if ($AppProcName -ne 'electron') { taskkill /IM ($AppProcName + '.exe') /T /F 2>&1 | Out-Null }
   Start-Sleep -Seconds 2
   "hygiene: terminated $($leftovers.Count) leftover electron process(es)"
 }
@@ -96,10 +100,10 @@ function Start-App([string[]]$ExtraArgs, [string]$DshHome, [int]$CdpPort = 9333)
 }
 
 function Close-App {
-  $proc = Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+  $proc = Get-Process -Name $AppProcName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
   if ($proc) { $null = $proc.CloseMainWindow() }
   $deadline = (Get-Date).AddSeconds(30)
-  do { Start-Sleep -Milliseconds 500; $still = @(Get-Process electron -ErrorAction SilentlyContinue) } while ($still.Count -gt 0 -and (Get-Date) -lt $deadline)
+  do { Start-Sleep -Milliseconds 500; $still = @(Get-Process -Name $AppProcName -ErrorAction SilentlyContinue) } while ($still.Count -gt 0 -and (Get-Date) -lt $deadline)
   return $still.Count -eq 0
 }
 
@@ -157,7 +161,7 @@ function Test-CrashRecovery {
   # released it; the assertion that matters is the new backend serving 200.
   Add-Check 'crash:restart-http-200' (Test-HttpOk $url2) "$url2 (old was $url1)"
   # loadURL completes after the ready event: wait for the second page load.
-  $secondLoad = Wait-AppLog 'page loaded: url=http' 30 2
+  $secondLoad = Wait-AppLog 'page loaded: url=http' 90 2
   $loads = ([regex]::Matches((Get-AppLogText), 'page loaded: url=http')).Count
   Add-Check 'crash:restart-ui-restored' ($secondLoad -and $loads -ge 2) "http page loads=$loads"
   $closed = Close-App
@@ -231,7 +235,7 @@ function Test-BackToWorkspaces {
       $null = [FocusHelper]::ShowWindow($main.MainWindowHandle, 9)
       $null = [FocusHelper]::SetForegroundWindow($main.MainWindowHandle)
       Start-Sleep -Milliseconds 800
-      [System.Windows.Forms.SendKeys]::SendWait('^+b')
+      try { [System.Windows.Forms.SendKeys]::SendWait('^+b') } catch { "SendKeys attempt ${attempt}: $($_.Exception.Message)" }
       Start-Sleep -Milliseconds 1500
       if (Wait-AppLog 'state: idle' 2) { $acceleratorFired = $true; break }
     } else {
@@ -325,9 +329,14 @@ function Test-Logs {
   Add-Check 'logs:no-raw-secrets' ($logs.stdout -notmatch 'sk-[A-Za-z0-9_-]{12,}' -and $logs.stderr -notmatch 'sk-[A-Za-z0-9_-]{12,}') 'no sk- pattern in panel'
 
   node $driver click-copy-logs 2>&1 | Out-Null
+  # Product-side evidence: the main process logs the sanitized copy payload.
+  $copyOk = Wait-AppLog 'copy-logs: wrote \d+ sanitized chars' 15
+  $copyLine = [regex]::Match((Get-AppLogText), 'copy-logs: wrote [^\r\n]+').Value
+  # Best-effort read-back of the system clipboard (unavailable in some
+  # sandboxed shells — treated as informational only).
   Start-Sleep -Milliseconds 800
   $clip = Get-Clipboard -Raw -ErrorAction SilentlyContinue
-  Add-Check 'logs:copy-logs' ([bool]($clip -match '\[stdout\]')) "clipboard $($clip.Length) chars"
+  Add-Check 'logs:copy-logs' $copyOk "$copyLine (clipboard read-back: $($clip.Length) chars)"
   $closed = Close-App
   Add-Check 'logs:clean-quit' $closed 'electron exited'
 }

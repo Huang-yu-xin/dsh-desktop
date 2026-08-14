@@ -1,13 +1,10 @@
 /**
- * Central V1 constants. The pinned harness package spec is the one lever that
- * keeps the desktop app on a known DeepSeek Harness release while the package
- * is in Developer Preview: bump it deliberately, never follow `latest`
- * silently. A future version can also swap this for a project-local binary.
+ * Central V1 constants. The pinned harness package spec documents the exact
+ * release bundled as a production dependency (see package.json); the actual
+ * spawn path resolves it locally through src/main/runtime.ts — npm/npx are
+ * never used at runtime.
  */
 export const HARNESS_PACKAGE_SPEC = '@deepseek-ai/dsh@0.1.0-rc.6';
-
-/** Binary the pinned package exports (its package.json `bin.dsh`). */
-export const HARNESS_BIN = 'dsh';
 
 /** Fixed argument vector: loopback bind + OS-assigned port (no port races). */
 export const HARNESS_ARGS: readonly string[] = ['web', '--host', '127.0.0.1', '--port', '0'];
@@ -30,9 +27,6 @@ export const HTTP_POLL_INTERVAL_MS = 500;
 
 /** Hard cap on retained harness stdout/stderr (the tail is kept, per stream). */
 export const MAX_CAPTURED_LOG_CHARS = 262_144;
-
-/** Node range the official CLI documents (repo `engines`). */
-export const REQUIRED_NODE_RANGE = '^22.19.0 || >=24.0.0';
 
 /** Interval between post-ready health checks (GET / on the harness origin). */
 export const HEALTH_CHECK_INTERVAL_MS = 5_000;

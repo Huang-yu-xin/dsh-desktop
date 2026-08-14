@@ -27,11 +27,12 @@ import {
   MAX_CAPTURED_LOG_CHARS,
   READY_LINE_PATTERN,
   READY_LINE_TIMEOUT_MS,
-  REQUIRED_NODE_RANGE,
   STOP_WAIT_TIMEOUT_MS,
 } from './config';
-import { findNodeToolchain, killProcessTree, spawnHarness } from './process';
+import { killProcessTree, spawnHarness } from './process';
 import type { KillResult } from './process';
+import { resolveHarnessRuntime } from './runtime';
+import type { HarnessRuntime } from './runtime';
 
 export type HarnessPhase =
   | 'idle'
@@ -189,15 +190,18 @@ export class HarnessController extends EventEmitter {
     this.exitHandled = false;
     this.healthFailures = 0;
 
-    const toolchain = findNodeToolchain();
-    if (toolchain === null) {
-      this.fail('startup-failed', `Node.js/npm not found: install Node.js ${REQUIRED_NODE_RANGE} and make sure "npm" is on PATH`);
+    let runtime: HarnessRuntime;
+    try {
+      runtime = resolveHarnessRuntime();
+      this.emit('log', `bundled harness runtime: ${runtime.binPath} (dsh ${runtime.version ?? 'unknown'})`);
+    } catch (err) {
+      this.fail('startup-failed', err instanceof Error ? err.message : String(err));
       return;
     }
 
     let child: ChildProcess;
     try {
-      child = spawnHarness(toolchain, workspace);
+      child = spawnHarness(runtime, workspace);
     } catch (err) {
       this.fail('startup-failed', `failed to spawn harness: ${err instanceof Error ? err.message : String(err)}`);
       return;

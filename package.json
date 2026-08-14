@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "DeepSeek Harness Desktop — the official DeepSeek Harness Web UI wrapped in a native Windows app",
   "main": "dist/main/index.js",
@@ -8,12 +8,18 @@
     "build": "tsc && node scripts/copy-assets.cjs",
     "start": "electron .",
     "dev": "npm run build && electron .",
-    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-loop.ps1"
+    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-loop.ps1",
+    "stage": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-runtime.ps1",
+    "dist": "npm run build && npm run stage && electron-builder --win"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
     "electron": "43.4.0",
+    "electron-builder": "^26.15.3",
     "typescript": "5.9.3",
     "ws": "^8.21.3"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6"
   }
 }

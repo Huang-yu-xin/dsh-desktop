@@ -3,12 +3,15 @@
 #             running harness (its own env-based credential mechanism),
 #             drive the UI through CDP, verify the read-only task, close.
 #   persist : relaunch the same workspace and verify session persistence.
-param([ValidateSet('agent', 'persist')][string]$Mode = 'agent')
+param([ValidateSet('agent', 'persist')][string]$Mode = 'agent', [string]$ExePath = '')
 $ErrorActionPreference = 'Stop'
 $root = 'D:\software\dsh-desktop'
 $workspace = 'D:\software'
 $appLog = Join-Path $env:APPDATA 'dsh-desktop\dsh-desktop.log'
-$electronExe = Join-Path $root 'node_modules\electron\dist\electron.exe'
+# DEV default: the Electron binary from the project tree. PACKAGED runs pass
+# -ExePath pointing at the built/installed "DeepSeek Harness Desktop.exe".
+$electronExe = if ($ExePath) { $ExePath } else { Join-Path $root 'node_modules\electron\dist\electron.exe' }
+$AppProcName = [System.IO.Path]::GetFileNameWithoutExtension($electronExe)
 
 # ---- process environment block reader (reads ONLY the real env block:
 #      terminates at the empty-entry marker, never touches adjacent memory) ----
@@ -24,14 +27,14 @@ function Wait-AppLog([string]$Pattern, [int]$TimeoutSec) {
 }
 
 function Close-AppWindow {
-  $proc = Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+  $proc = Get-Process -Name $AppProcName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
   if ($proc) { $null = $proc.CloseMainWindow(); return $true }
   return $false
 }
 
 function Wait-ElectronExit([int]$TimeoutSec) {
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
-  do { Start-Sleep -Milliseconds 500; $still = @(Get-Process electron -ErrorAction SilentlyContinue) } while ($still.Count -gt 0 -and (Get-Date) -lt $deadline)
+  do { Start-Sleep -Milliseconds 500; $still = @(Get-Process -Name $AppProcName -ErrorAction SilentlyContinue) } while ($still.Count -gt 0 -and (Get-Date) -lt $deadline)
   return $still.Count -eq 0
 }
 
@@ -67,7 +70,10 @@ if ($Mode -eq 'agent') {
 }
 
 # ---- launch the desktop app (real DSH_HOME, real workspace, CDP open) ----
-$p = Start-Process -FilePath $electronExe -ArgumentList @('.', '--workspace', $workspace, '--remote-debugging-port=9333') -WorkingDirectory $root -PassThru
+# The app-path '.' argument is for DEV electron runs only; the packaged exe
+# takes no app-path argument.
+$launchArgs = if ($ExePath) { @('--workspace', $workspace, '--remote-debugging-port=9333') } else { @('.', '--workspace', $workspace, '--remote-debugging-port=9333') }
+$p = Start-Process -FilePath $electronExe -ArgumentList $launchArgs -WorkingDirectory $root -PassThru
 "app pid=$($p.Id) mode=$Mode"
 $null = Wait-AppLog 'state: ready' 180
 $appState = if (Test-Path $appLog) { [System.IO.File]::ReadAllText($appLog) } else { '' }
